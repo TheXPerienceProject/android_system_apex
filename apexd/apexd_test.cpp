@@ -83,6 +83,8 @@ using ::testing::Not;
 using ::testing::StartsWith;
 using ::testing::UnorderedElementsAre;
 using ::testing::UnorderedElementsAreArray;
+using ::testing::internal::CaptureStderr;
+using ::testing::internal::GetCapturedStderr;
 
 static std::string GetTestDataDir() { return GetExecutableDirectory(); }
 static std::string GetTestFile(const std::string& name) {
@@ -213,10 +215,11 @@ class ApexdUnitTest : public ::testing::Test {
 
   std::string AddBlockApex(const std::string& apex_name,
                            const std::string& public_key = "",
-                           const std::string& root_digest = "") {
-    auto apex_path = vm_payload_disk_ + "2";  // second partition
+                           const std::string& root_digest = "",
+                           bool is_factory = true) {
+    auto apex_path = vm_payload_disk_ + std::to_string(block_device_index_++);
     auto apex_file = GetTestFile(apex_name);
-    WriteMetadata(apex_file, public_key, root_digest);
+    AddToMetadata(apex_name, public_key, root_digest, is_factory);
     // loop_devices_ will be disposed after each test
     loop_devices_.push_back(*WriteBlockApex(apex_file, apex_path));
     return apex_path;
@@ -269,24 +272,23 @@ class ApexdUnitTest : public ::testing::Test {
 
     DeleteDirContent(ApexSession::GetSessionsDir());
   }
-  void WriteMetadata(const std::string& apex_file,
+  void AddToMetadata(const std::string& apex_name,
                      const std::string& public_key,
-                     const std::string& root_digest) {
+                     const std::string& root_digest, bool is_factory) {
     android::microdroid::Metadata metadata;
-
-    auto apex = metadata.add_apexes();
-    apex->set_name("apex");
-    apex->set_public_key(public_key);
-    apex->set_root_digest(root_digest);
-    // In this test, block apeses are assumed as "factory".
-    // ApexFileRepositoryTestAddBlockApex tests non-factory cases.
-    apex->set_is_factory(true);
-
     // The first partition is metadata partition
     auto metadata_partition = vm_payload_disk_ + "1";
-    LOG(INFO) << "Writing metadata to " << metadata_partition;
-    std::ofstream out(metadata_partition);
+    if (access(metadata_partition.c_str(), F_OK) == 0) {
+      metadata = *android::microdroid::ReadMetadata(metadata_partition);
+    }
 
+    auto apex = metadata.add_apexes();
+    apex->set_name(apex_name);
+    apex->set_public_key(public_key);
+    apex->set_root_digest(root_digest);
+    apex->set_is_factory(is_factory);
+
+    std::ofstream out(metadata_partition);
     android::microdroid::WriteMetadata(metadata, out);
   }
 
@@ -308,6 +310,7 @@ class ApexdUnitTest : public ::testing::Test {
   std::string metadata_sepolicy_staged_dir_;
   ApexdConfig config_;
   std::vector<loop::LoopbackDeviceUniqueFd> loop_devices_;  // to be cleaned up
+  int block_device_index_ = 2;  // "1" is reserved for metadata;
 };
 
 // Apex that does not have pre-installed version, does not get selected
@@ -3047,29 +3050,25 @@ TEST_F(ApexdMountTest,
                                    ApexInfoXmlEq(apex_info_xml_2)));
 }
 
+void PrepareFlattenedApex(const std::string& apex_dir,
+                          const std::string& apex_name, int version) {
+  ASSERT_EQ(mkdir(apex_dir.c_str(), 0755), 0);
+
+  ::apex::proto::ApexManifest manifest;
+  manifest.set_name(apex_name);
+  manifest.set_version(version);
+  manifest.set_versionname(std::to_string(version));
+
+  std::string out;
+  manifest.SerializeToString(&out);
+  ASSERT_TRUE(WriteStringToFile(out, apex_dir + "/apex_manifest.pb"));
+}
+
 TEST_F(ApexdMountTest, ActivateFlattenedApex) {
   std::string apex_dir_1 = GetBuiltInDir() + "/com.android.apex.test_package";
   std::string apex_dir_2 = GetBuiltInDir() + "/com.android.apex.test_package_2";
-
-  ASSERT_EQ(mkdir(apex_dir_1.c_str(), 0755), 0);
-  ASSERT_EQ(mkdir(apex_dir_2.c_str(), 0755), 0);
-
-  auto write_manifest_fn = [&](const std::string& apex_dir,
-                               const std::string& module_name, int version) {
-    using ::apex::proto::ApexManifest;
-
-    ApexManifest manifest;
-    manifest.set_name(module_name);
-    manifest.set_version(version);
-    manifest.set_versionname(std::to_string(version));
-
-    std::string out;
-    manifest.SerializeToString(&out);
-    ASSERT_TRUE(WriteStringToFile(out, apex_dir + "/apex_manifest.pb"));
-  };
-
-  write_manifest_fn(apex_dir_1, "com.android.apex.test_package", 2);
-  write_manifest_fn(apex_dir_2, "com.android.apex.test_package_2", 1);
+  PrepareFlattenedApex(apex_dir_1, "com.android.apex.test_package", 2);
+  PrepareFlattenedApex(apex_dir_2, "com.android.apex.test_package_2", 1);
 
   ASSERT_EQ(ActivateFlattenedApex(), 0);
 
@@ -3105,6 +3104,20 @@ TEST_F(ApexdMountTest, ActivateFlattenedApex) {
   ASSERT_THAT(info_list->getApexInfo(),
               UnorderedElementsAre(ApexInfoXmlEq(apex_info_xml_1),
                                    ApexInfoXmlEq(apex_info_xml_2)));
+}
+
+TEST_F(ApexdMountTest, ActivateFlattenedApexShouldFailWithDuplicate) {
+  // Two flattened APEXes with the same name
+  PrepareFlattenedApex(GetBuiltInDir() + "/com.android.apex.test_package",
+                       "com.android.apex.test_package", 1);
+  PrepareFlattenedApex(GetBuiltInDir() + "/com.android.apex.test_package_2",
+                       "com.android.apex.test_package", 1);
+
+  CaptureStderr();
+  ASSERT_EQ(ActivateFlattenedApex(), 1);
+  std::string error = GetCapturedStderr();
+  ASSERT_THAT(error,
+              HasSubstr("duplicate of com.android.apex.test_package found"));
 }
 
 TEST_F(ApexdMountTest, OnStartOnlyPreInstalledApexes) {
@@ -4077,6 +4090,65 @@ TEST_F(ApexdMountTest, OnStartInVmModeFailsWithDuplicateNames) {
   AddBlockApex("apex.apexd_test_v2.apex");
 
   ASSERT_EQ(1, OnStartInVmMode());
+}
+
+TEST_F(ApexdMountTest, OnStartInVmSupportsMultipleSharedLibsApexes) {
+  MockCheckpointInterface checkpoint_interface;
+  InitializeVold(&checkpoint_interface);
+  SetBlockApexEnabled(true);
+
+  auto path1 =
+      AddBlockApex("com.android.apex.test.sharedlibs_generated.v1.libvX.apex",
+                   /*public_key=*/"", /*root_digest=*/"", /*is_factory=*/true);
+  auto path2 =
+      AddBlockApex("com.android.apex.test.sharedlibs_generated.v2.libvY.apex",
+                   /*public_key=*/"", /*root_digest=*/"", /*is_factory=*/false);
+
+  ASSERT_EQ(0, OnStartInVmMode());
+  UnmountOnTearDown(path1);
+  UnmountOnTearDown(path2);
+
+  // Btw, in case duplicates are sharedlibs apexes, both should be activated
+  auto apex_mounts = GetApexMounts();
+  ASSERT_THAT(apex_mounts,
+              UnorderedElementsAre("/apex/com.android.apex.test.sharedlibs@1",
+                                   "/apex/com.android.apex.test.sharedlibs@2",
+                                   // Emits apex-info-list as well
+                                   "/apex/apex-info-list.xml"));
+}
+
+TEST_F(ApexdMountTest, OnStartInVmShouldRejectInDuplicateFactoryApexes) {
+  MockCheckpointInterface checkpoint_interface;
+  InitializeVold(&checkpoint_interface);
+  SetBlockApexEnabled(true);
+
+  auto path1 =
+      AddBlockApex("com.android.apex.test.sharedlibs_generated.v1.libvX.apex",
+                   /*public_key=*/"", /*root_digest=*/"", /*is_factory=*/true);
+  auto path2 =
+      AddBlockApex("com.android.apex.test.sharedlibs_generated.v2.libvY.apex",
+                   /*public_key=*/"", /*root_digest=*/"", /*is_factory=*/true);
+
+  ASSERT_EQ(1, OnStartInVmMode());
+  UnmountOnTearDown(path1);
+  UnmountOnTearDown(path2);
+}
+
+TEST_F(ApexdMountTest, OnStartInVmShouldRejectInDuplicateNonFactoryApexes) {
+  MockCheckpointInterface checkpoint_interface;
+  InitializeVold(&checkpoint_interface);
+  SetBlockApexEnabled(true);
+
+  auto path1 =
+      AddBlockApex("com.android.apex.test.sharedlibs_generated.v1.libvX.apex",
+                   /*public_key=*/"", /*root_digest=*/"", /*is_factory=*/false);
+  auto path2 =
+      AddBlockApex("com.android.apex.test.sharedlibs_generated.v2.libvY.apex",
+                   /*public_key=*/"", /*root_digest=*/"", /*is_factory=*/false);
+
+  ASSERT_EQ(1, OnStartInVmMode());
+  UnmountOnTearDown(path1);
+  UnmountOnTearDown(path2);
 }
 
 TEST_F(ApexdMountTest, OnStartInVmModeFailsWithWrongPubkey) {
