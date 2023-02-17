@@ -3131,34 +3131,6 @@ void OnAllPackagesActivated(bool is_bootstrap) {
   }
 }
 
-std::future<void> FinishLoopConfiguration() {
-  // Now we can finish configuring loop devices, as it won't block the boot
-  // sequence.
-  std::vector<MountedApexData> mounted_apexes;
-  gMountedApexes.ForallMountedApexes(
-      [&](const std::string& /*package*/, const MountedApexData& data,
-          bool latest) { mounted_apexes.emplace_back(data); });
-  LOG(INFO) << "Finalizing configuration of " << mounted_apexes.size()
-            << " loop devices";
-  // A very basic version of the async IO. We should use the io_uring on
-  // devices that support it.
-  return std::async(
-      std::launch::async,
-      [](std::vector<MountedApexData>&& mounted_apexes) {
-        auto time_started = boot_clock::now();
-        for (const auto& apex : mounted_apexes) {
-          loop::FinishConfiguring(apex.loop_name, apex.full_path);
-        }
-        auto time_elapsed =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                boot_clock::now() - time_started)
-                .count();
-        LOG(INFO) << "Finished confuring " << mounted_apexes.size()
-                  << " loop devices duration=" << time_elapsed;
-      },
-      std::move(mounted_apexes));
-}
-
 void OnAllPackagesReady() {
   // Set a system property to let other components know that APEXs are
   // correctly mounted and ready to be used. Before using any file from APEXs,
@@ -3816,8 +3788,17 @@ int ActivateFlattenedApex() {
         continue;
       }
 
-      apex_infos.emplace_back(manifest->name(), /* modulePath= */ apex_dir,
-                              /* preinstalledModulePath= */ apex_dir,
+      // b/179211712 the stored path should be the realpath, otherwise the path
+      // we get by scanning the directory would be different from the path we
+      // get by reading /proc/mounts, if the apex file is on a symlink dir.
+      std::string realpath;
+      if (!android::base::Realpath(apex_dir, &realpath)) {
+        PLOG(ERROR) << "can't get realpath of " << apex_dir;
+        continue;
+      }
+
+      apex_infos.emplace_back(manifest->name(), /* modulePath= */ realpath,
+                              /* preinstalledModulePath= */ realpath,
                               /* versionCode= */ manifest->version(),
                               /* versionName= */ manifest->versionname(),
                               /* isFactory= */ true, /* isActive= */ true,
