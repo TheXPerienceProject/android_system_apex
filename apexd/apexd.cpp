@@ -62,6 +62,7 @@
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <ranges>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -77,6 +78,7 @@
 #include "apex_manifest.h"
 #include "apex_sha.h"
 #include "apex_shim.h"
+#include "apexd_brand_new_verifier.h"
 #include "apexd_checkpoint.h"
 #include "apexd_dm.h"
 #include "apexd_lifecycle.h"
@@ -183,11 +185,7 @@ bool IsBootstrapApex(const ApexFile& apex) {
     return ret;
   }();
 
-  if (IsVendorApex(apex) && apex.GetManifest().vendorbootstrap()) {
-    return true;
-  }
-
-  if (apex.GetManifest().bootstrap()) {
+  if (apex.GetManifest().vendorbootstrap() || apex.GetManifest().bootstrap()) {
     return true;
   }
 
@@ -405,18 +403,13 @@ Result<MountedApexData> MountPackageImpl(const ApexFile& apex,
   }
   LOG(VERBOSE) << "Loopback device created: " << loopback_device.name;
 
-  auto& instance = ApexFileRepository::GetInstance();
-
-  auto public_key = instance.GetPublicKey(apex.GetManifest().name());
-  if (!public_key.ok()) {
-    return public_key.error();
-  }
-
-  auto verity_data = apex.VerifyApexVerity(*public_key);
+  auto verity_data = apex.VerifyApexVerity(apex.GetBundledPublicKey());
   if (!verity_data.ok()) {
     return Error() << "Failed to verify Apex Verity data for " << full_path
                    << ": " << verity_data.error();
   }
+
+  auto& instance = ApexFileRepository::GetInstance();
   if (instance.IsBlockApex(apex)) {
     auto root_digest = instance.GetBlockApexRootDigest(apex.GetPath());
     if (root_digest.has_value() &&
@@ -638,10 +631,8 @@ Result<void> VerifyVndkVersion(const ApexFile& apex_file) {
       GetProperty("ro.product.vndk.version", "");
 
   const auto& instance = ApexFileRepository::GetInstance();
-  const auto& preinstalled =
-      instance.GetPreInstalledApex(apex_file.GetManifest().name());
-  const auto& path = preinstalled.get().GetPath();
-  if (InVendorPartition(path) || InOdmPartition(path)) {
+  const auto& partition = OR_RETURN(instance.GetPartition(apex_file));
+  if (partition == ApexPartition::Vendor || partition == ApexPartition::Odm) {
     if (vndk_version != vendor_vndk_version) {
       return Error() << "vndkVersion(" << vndk_version
                      << ") doesn't match with device VNDK version("
@@ -649,8 +640,7 @@ Result<void> VerifyVndkVersion(const ApexFile& apex_file) {
     }
     return {};
   }
-  if (StartsWith(path, "/product/apex/") ||
-      StartsWith(path, "/system/product/apex/")) {
+  if (partition == ApexPartition::Product) {
     if (vndk_version != product_vndk_version) {
       return Error() << "vndkVersion(" << vndk_version
                      << ") doesn't match with device VNDK version("
@@ -666,12 +656,9 @@ Result<void> VerifyVndkVersion(const ApexFile& apex_file) {
 // each boot. Try to avoid putting expensive checks inside this function.
 Result<void> VerifyPackageBoot(const ApexFile& apex_file) {
   // TODO(ioffe): why do we need this here?
-  auto& instance = ApexFileRepository::GetInstance();
-  auto public_key = instance.GetPublicKey(apex_file.GetManifest().name());
-  if (!public_key.ok()) {
-    return public_key.error();
-  }
-  Result<ApexVerityData> verity_or = apex_file.VerifyApexVerity(*public_key);
+  const auto& public_key =
+      OR_RETURN(apexd_private::GetVerifiedPublicKey(apex_file));
+  Result<ApexVerityData> verity_or = apex_file.VerifyApexVerity(public_key);
   if (!verity_or.ok()) {
     return verity_or.error();
   }
@@ -701,6 +688,13 @@ Result<void> VerifyPackagesStagedInstall(
     const std::vector<ApexFile>& apex_files) {
   for (const auto& apex_file : apex_files) {
     OR_RETURN(VerifyPackageBoot(apex_file));
+
+    // Extra verification for brand-new APEX. The case that brand-new APEX is
+    // not enabled when there is install request for brand-new APEX is already
+    // covered in |VerifyPackageBoot|.
+    if (ApexFileRepository::IsBrandNewApexEnabled()) {
+      OR_RETURN(VerifyBrandNewPackageAgainstActive(apex_file));
+    }
   }
 
   // Since there can be multiple staged sessions, let's verify incoming APEXes
@@ -917,6 +911,19 @@ Result<void> MountPackage(const ApexFile& apex, const std::string& mount_point,
 }
 
 namespace apexd_private {
+
+Result<std::string> GetVerifiedPublicKey(const ApexFile& apex) {
+  auto preinstalled_public_key =
+      ApexFileRepository::GetInstance().GetPublicKey(apex.GetManifest().name());
+  if (preinstalled_public_key.ok()) {
+    return *preinstalled_public_key;
+  } else if (ApexFileRepository::IsBrandNewApexEnabled() &&
+             VerifyBrandNewPackageAgainstPreinstalled(apex).ok()) {
+    return apex.GetBundledPublicKey();
+  }
+  return Error() << "No preinstalled apex found for unverified package "
+                 << apex.GetManifest().name();
+}
 
 bool IsMounted(const std::string& full_path) {
   bool found_mounted = false;
@@ -2190,8 +2197,7 @@ int OnBootstrap() {
   auto time_started = boot_clock::now();
 
   ApexFileRepository& instance = ApexFileRepository::GetInstance();
-  Result<void> status =
-      instance.AddPreInstalledApex(gConfig->apex_built_in_dirs);
+  Result<void> status = instance.AddPreInstalledApex(gConfig->builtin_dirs);
   if (!status.ok()) {
     LOG(ERROR) << "Failed to collect APEX keys : " << status.error();
     return 1;
@@ -2294,11 +2300,18 @@ void InitializeSessionManager(ApexSessionManager* session_manager) {
 void Initialize(CheckpointInterface* checkpoint_service) {
   InitializeVold(checkpoint_service);
   ApexFileRepository& instance = ApexFileRepository::GetInstance();
-  Result<void> status = instance.AddPreInstalledApex(kApexPackageBuiltinDirs);
+  Result<void> status = instance.AddPreInstalledApex(gConfig->builtin_dirs);
   if (!status.ok()) {
     LOG(ERROR) << "Failed to collect pre-installed APEX files : "
                << status.error();
     return;
+  }
+
+  if (ApexFileRepository::IsBrandNewApexEnabled()) {
+    Result<void> result = instance.AddBrandNewApexCredentialAndBlocklist(
+        kPartitionToBrandNewApexConfigDirs);
+    CHECK(result.ok()) << "Failed to collect pre-installed public keys and "
+                          "blocklists for brand-new APEX";
   }
 
   gMountedApexes.PopulateFromMounts(
@@ -2346,13 +2359,6 @@ std::vector<ApexFileRef> SelectApexForActivation(
       LOG(FATAL) << "Unexpectedly found more than two versions or none for "
                     "APEX package "
                  << package_name;
-      continue;
-    }
-
-    // The package must have a pre-installed version before we consider it for
-    // activation
-    if (!instance.HasPreInstalledVersion(package_name)) {
-      LOG(INFO) << "Package " << package_name << " is not pre-installed";
       continue;
     }
 
@@ -3054,6 +3060,21 @@ int64_t CalculateSizeForCompressedApex(
   return result;
 }
 
+std::string CastPartition(ApexPartition in) {
+  switch (in) {
+    case ApexPartition::System:
+      return "SYSTEM";
+    case ApexPartition::SystemExt:
+      return "SYSTEM_EXT";
+    case ApexPartition::Product:
+      return "PRODUCT";
+    case ApexPartition::Vendor:
+      return "VENDOR";
+    case ApexPartition::Odm:
+      return "ODM";
+  }
+}
+
 void CollectApexInfoList(std::ostream& os,
                          const std::vector<ApexFile>& active_apexs,
                          const std::vector<ApexFile>& inactive_apexs) {
@@ -3070,6 +3091,8 @@ void CollectApexInfoList(std::ostream& os,
       preinstalled_module_path = *preinstalled_path;
     }
 
+    auto partition = CastPartition(OR_FATAL(instance.GetPartition(apex)));
+
     std::optional<int64_t> mtime =
         instance.GetBlockApexLastUpdateSeconds(apex.GetPath());
     if (!mtime.has_value()) {
@@ -3084,7 +3107,7 @@ void CollectApexInfoList(std::ostream& os,
         apex.GetManifest().name(), apex.GetPath(), preinstalled_module_path,
         apex.GetManifest().version(), apex.GetManifest().versionname(),
         instance.IsPreInstalledApex(apex), is_active, mtime,
-        apex.GetManifest().providesharedapexlibs());
+        apex.GetManifest().providesharedapexlibs(), partition);
     apex_infos.emplace_back(std::move(apex_info));
   };
   for (const auto& apex : active_apexs) {
@@ -3193,7 +3216,7 @@ int OnStartInVmMode() {
   auto& instance = ApexFileRepository::GetInstance();
 
   // Scan pre-installed apexes
-  if (auto status = instance.AddPreInstalledApex(gConfig->apex_built_in_dirs);
+  if (auto status = instance.AddPreInstalledApex(gConfig->builtin_dirs);
       !status.ok()) {
     LOG(ERROR) << "Failed to scan pre-installed APEX files: " << status.error();
     return 1;
@@ -3226,10 +3249,10 @@ int OnStartInVmMode() {
 
 int OnOtaChrootBootstrap(bool also_include_staged_apexes) {
   auto& instance = ApexFileRepository::GetInstance();
-  if (auto status = instance.AddPreInstalledApex(gConfig->apex_built_in_dirs);
+  if (auto status = instance.AddPreInstalledApex(gConfig->builtin_dirs);
       !status.ok()) {
     LOG(ERROR) << "Failed to scan pre-installed apexes from "
-               << Join(gConfig->apex_built_in_dirs, ',');
+               << std::format("{}", gConfig->builtin_dirs | std::views::values);
     return 1;
   }
   if (also_include_staged_apexes) {

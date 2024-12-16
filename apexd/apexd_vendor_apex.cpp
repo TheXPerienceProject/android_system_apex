@@ -34,27 +34,6 @@ namespace apex {
 
 using apexd_private::GetActiveMountPoint;
 
-bool InVendorPartition(const std::string& path) {
-  return StartsWith(path, "/vendor/apex/") ||
-         StartsWith(path, "/system/vendor/apex/");
-}
-
-bool InOdmPartition(const std::string& path) {
-  return StartsWith(path, "/odm/apex/") ||
-         StartsWith(path, "/vendor/odm/apex/") ||
-         StartsWith(path, "/system/vendor/odm/apex/");
-}
-
-// Returns if apex is a vendor apex, works by testing path of its preinstalled
-// version.
-bool IsVendorApex(const ApexFile& apex_file) {
-  const auto& instance = ApexFileRepository::GetInstance();
-  const auto& preinstalled =
-      instance.GetPreInstalledApex(apex_file.GetManifest().name());
-  const auto& path = preinstalled.get().GetPath();
-  return InVendorPartition(path) || InOdmPartition(path);
-}
-
 static Result<bool> HasVintfIn(std::span<const std::string> apex_mounts) {
   for (const auto& mount : apex_mounts) {
     if (OR_RETURN(PathExists(mount + "/etc/vintf"))) return true;

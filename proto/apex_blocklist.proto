@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2023 The Android Open Source Project
+ * Copyright (C) 2024 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,26 +14,25 @@
  * limitations under the License.
  */
 
-#ifndef ANDROID_APEXD_VENDOR_APEX_H_
-#define ANDROID_APEXD_VENDOR_APEX_H_
+syntax = "proto3";
 
-#include <android-base/result.h>
+package apex.proto;
 
-#include <span>
-#include <string>
+option java_package = "com.android.apex";
+option java_outer_classname = "Protos";
 
-#include "apex_file.h"
+message ApexBlocklist {
+  message ApexItem {
+    // Required.
+    // APEX name defined in manifest.
+    string name = 1;
 
-using android::base::Result;
+    // Required.
+    // Version number. Must be positive. Any version that is equal to or lower
+    // than the specified version is blocked.
+    int64 version = 2;
+  }
 
-namespace android {
-namespace apex {
-
-// Check VINTF for incoming apex updates.
-Result<void> CheckVintf(std::span<const ApexFile> apex_files,
-                        std::span<const std::string> mount_points);
-
-}  // namespace apex
-}  // namespace android
-
-#endif  // ANDROID_APEXD_VENDOR_APEX_H_
+  // The list of APEX that should be blocked from installation.
+  repeated ApexItem blocked_apex = 1;
+}
