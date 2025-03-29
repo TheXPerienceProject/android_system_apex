@@ -32,6 +32,8 @@ static constexpr const char* kActiveApexPackagesDataDir = "/data/apex/active";
 static constexpr const char* kApexBackupDir = "/data/apex/backup";
 static constexpr const char* kApexDecompressedDir = "/data/apex/decompressed";
 static constexpr const char* kOtaReservedDir = "/data/apex/ota_reserved";
+static constexpr const char* kMetadataImagesDir = "/metadata/apex/images";
+static constexpr const char* kDataImagesDir = "/data/apex/images";
 static constexpr const char* kApexPackageSystemDir = "/system/apex";
 static constexpr const char* kApexPackageSystemExtDir = "/system_ext/apex";
 static constexpr const char* kApexPackageProductDir = "/product/apex";
@@ -69,7 +71,7 @@ static constexpr const char* kOtaApexPackageSuffix = ".ota.apex";
 static constexpr const char* kManifestFilenameJson = "apex_manifest.json";
 static constexpr const char* kManifestFilenamePb = "apex_manifest.pb";
 
-static constexpr const char* kApexInfoList = "apex-info-list.xml";
+static constexpr const char* kApexInfoList = "/apex/apex-info-list.xml";
 
 // These should be in-sync with system/sepolicy/private/property_contexts
 static constexpr const char* kApexStatusSysprop = "apexd.status";

@@ -54,6 +54,11 @@ struct ApexdConfig {
   // and the subsequent numbers should point APEX files.
   const char* vm_payload_metadata_partition_prop;
   const char* active_apex_selinux_ctx;
+
+  // TODO(b/381173074) True in tests for now. Will be configured as true if
+  // - new device (ro.vendor.api_level >= 202504 (TBD))
+  // - or, upgrading device with migration done (e.g. flag in /metadata/apex)
+  bool mount_before_data;
 };
 
 static const ApexdConfig kDefaultConfig = {
@@ -65,6 +70,7 @@ static const ApexdConfig kDefaultConfig = {
     kStagedSessionsDir,
     kVmPayloadMetadataPartitionProp,
     "u:object_r:staging_data_file",
+    false, /* mount_before_data */
 };
 
 class CheckpointInterface;
@@ -149,9 +155,7 @@ void OnStart();
 // For every package X, there can be at most two APEX, pre-installed vs
 // installed on data. We decide which ones should be activated and return them
 // as a list
-std::vector<ApexFileRef> SelectApexForActivation(
-    const std::unordered_map<std::string, std::vector<ApexFileRef>>& all_apex,
-    const ApexFileRepository& instance);
+std::vector<ApexFileRef> SelectApexForActivation();
 std::vector<ApexFile> ProcessCompressedApex(
     const std::vector<ApexFileRef>& compressed_apex, bool is_ota_chroot);
 // Validate |apex| is same as |capex|
@@ -187,12 +191,12 @@ GetTempMountedApexData(const std::string& package);
 // Exposed for unit tests
 bool ShouldAllocateSpaceForDecompression(const std::string& new_apex_name,
                                          int64_t new_apex_version,
-                                         const ApexFileRepository& instance);
+                                         const ApexFileRepository& instance,
+                                         const MountedApexDatabase& db);
 
 int64_t CalculateSizeForCompressedApex(
     const std::vector<std::tuple<std::string, int64_t, int64_t>>&
-        compressed_apexes,
-    const ApexFileRepository& instance);
+        compressed_apexes);
 
 // Casts |ApexPartition| to partition string used in XSD.
 std::string CastPartition(ApexPartition partition);

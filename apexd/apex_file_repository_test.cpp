@@ -48,18 +48,12 @@ using namespace std::literals;
 namespace fs = std::filesystem;
 
 using android::apex::testing::ApexFileEq;
-using android::base::GetExecutableDirectory;
 using android::base::StringPrintf;
 using android::base::testing::Ok;
 using ::testing::ByRef;
 using ::testing::ContainerEq;
 using ::testing::Not;
 using ::testing::UnorderedElementsAre;
-
-static std::string GetTestDataDir() { return GetExecutableDirectory(); }
-static std::string GetTestFile(const std::string& name) {
-  return GetTestDataDir() + "/" + name;
-}
 
 namespace {
 // Copies the compressed apex to |built_in_dir| and decompresses it to
@@ -135,6 +129,28 @@ TEST(ApexFileRepositoryTest, InitializeSuccess) {
 
   test_fn("apex.apexd_test.apex");
   test_fn("apex.apexd_test_different_app.apex");
+}
+
+TEST(ApexFileRepositoryTest, AddPreInstalledApexParallel) {
+  TemporaryDir built_in_dir;
+  fs::copy(GetTestFile("apex.apexd_test.apex"), built_in_dir.path);
+  fs::copy(GetTestFile("apex.apexd_test_different_app.apex"),
+           built_in_dir.path);
+  ApexPartition partition = ApexPartition::System;
+  std::unordered_map<ApexPartition, std::string> apex_dir = {
+      {partition, built_in_dir.path}};
+
+  ApexFileRepository instance0;
+  instance0.AddPreInstalledApex(apex_dir);
+  auto expected = instance0.GetPreInstalledApexFiles();
+
+  ApexFileRepository instance;
+  ASSERT_RESULT_OK(instance.AddPreInstalledApexParallel(apex_dir));
+  auto actual = instance.GetPreInstalledApexFiles();
+  ASSERT_EQ(actual.size(), expected.size());
+  for (size_t i = 0; i < actual.size(); ++i) {
+    ASSERT_THAT(actual[i], ApexFileEq(expected[i]));
+  }
 }
 
 TEST(ApexFileRepositoryTest, InitializeFailureCorruptApex) {
