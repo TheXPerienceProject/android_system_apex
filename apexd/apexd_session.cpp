@@ -60,19 +60,7 @@ static Result<SessionState> ParseSessionState(const std::string& session_dir) {
 
 }  // namespace
 
-std::string GetSessionsDir() {
-  static std::string result;
-  static std::once_flag once_flag;
-  std::call_once(once_flag, [&]() {
-    auto status =
-        FindFirstExistingDirectory(kNewApexSessionsDir, kOldApexSessionsDir);
-    if (!status.ok()) {
-      LOG(FATAL) << status.error();
-    }
-    result = std::move(*status);
-  });
-  return result;
-}
+std::string GetSessionsDir() { return kApexSessionsDir; }
 
 ApexSession::ApexSession(SessionState state, std::string session_dir)
     : state_(std::move(state)), session_dir_(std::move(session_dir)) {}
@@ -134,6 +122,11 @@ ApexSession::GetApexFileHashes() const {
   return state_.apex_file_hashes();
 }
 
+const google::protobuf::RepeatedPtrField<std::string>
+ApexSession::GetApexImages() const {
+  return state_.apex_images();
+}
+
 const std::string& ApexSession::GetSessionDir() const { return session_dir_; }
 
 void ApexSession::SetBuildFingerprint(const std::string& fingerprint) {
@@ -167,6 +160,10 @@ void ApexSession::AddApexName(const std::string& apex_name) {
 
 void ApexSession::SetApexFileHashes(const std::vector<std::string>& hashes) {
   *(state_.mutable_apex_file_hashes()) = {hashes.begin(), hashes.end()};
+}
+
+void ApexSession::SetApexImages(const std::vector<std::string>& images) {
+  *(state_.mutable_apex_images()) = {images.begin(), images.end()};
 }
 
 Result<void> ApexSession::UpdateStateAndCommit(
@@ -221,15 +218,6 @@ std::vector<std::string> ApexSession::GetStagedApexDirs(
 
 ApexSessionManager::ApexSessionManager(std::string sessions_base_dir)
     : sessions_base_dir_(std::move(sessions_base_dir)) {}
-
-ApexSessionManager::ApexSessionManager(ApexSessionManager&& other) noexcept
-    : sessions_base_dir_(std::move(other.sessions_base_dir_)) {}
-
-ApexSessionManager& ApexSessionManager::operator=(
-    ApexSessionManager&& other) noexcept {
-  sessions_base_dir_ = std::move(other.sessions_base_dir_);
-  return *this;
-}
 
 std::unique_ptr<ApexSessionManager> ApexSessionManager::Create(
     std::string sessions_base_dir) {
@@ -293,18 +281,6 @@ std::vector<ApexSession> ApexSessionManager::GetSessionsInState(
                  sessions.end());
 
   return sessions;
-}
-
-Result<void> ApexSessionManager::MigrateFromOldSessionsDir(
-    const std::string& old_sessions_base_dir) {
-  if (old_sessions_base_dir == sessions_base_dir_) {
-    LOG(INFO)
-        << old_sessions_base_dir
-        << " is the same as the current session directory. Nothing to migrate";
-    return {};
-  }
-
-  return MoveDir(old_sessions_base_dir, sessions_base_dir_);
 }
 
 bool ApexSessionManager::HasActiveSession() {
